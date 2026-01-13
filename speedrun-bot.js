@@ -22,6 +22,9 @@ const state = {
     previous: 'initializing',
     doing: false,
     
+    // Timing
+    startTime: null,
+    
     // Village phase
     atVillage: false,
     villageSearching: false,
@@ -871,17 +874,41 @@ async function buildNetherPortal() {
     
     try {
         // Strategy: Place water source blocks to flow onto lava and create obsidian
-        // Then build up the portal frame
+        // This is the standard speedrun technique for portal building
         
         equipItem("water_bucket", "hand")
         await bot.waitForTicks(20)
         
-        log('Creating obsidian blocks by placing water on lava')
+        log('Placing water to create obsidian from lava')
         
-        // Try to create obsidian by water-lava interaction
-        // In a real speedrun, this would be more sophisticated
-        // For now, we'll wait and check for obsidian
+        // Place water near lava pool - it will flow and create obsidian
+        const nearbyLavaBlock = bot.blockAt(lavaPos)
+        if (nearbyLavaBlock) {
+            try {
+                // Find an adjacent air block to place water
+                const adjacentPositions = [
+                    lavaPos.offset(1, 0, 0),
+                    lavaPos.offset(-1, 0, 0),
+                    lavaPos.offset(0, 0, 1),
+                    lavaPos.offset(0, 0, -1),
+                    lavaPos.offset(0, 1, 0)
+                ]
+                
+                for (const pos of adjacentPositions) {
+                    const block = bot.blockAt(pos)
+                    if (block && block.name === 'air') {
+                        await bot.lookAt(pos)
+                        await bot.placeBlock(block, new Vec3(0, -1, 0))
+                        log('Water placed - waiting for obsidian formation')
+                        break
+                    }
+                }
+            } catch (err) {
+                log(`Water placement error: ${err.message}`, 'WARN')
+            }
+        }
         
+        // Wait for water to flow and create obsidian
         await bot.waitForTicks(100) // Wait 5 seconds for obsidian formation
         
         // Check if we have obsidian blocks nearby
@@ -898,11 +925,11 @@ async function buildNetherPortal() {
             equipItem("flint_and_steel", "hand")
             await bot.waitForTicks(20)
             
-            // Find a suitable obsidian block to light from
+            // Find a suitable obsidian block to light from (should be part of the frame)
             const centerObsidian = bot.blockAt(obsidianBlocks[0])
             if (centerObsidian) {
                 log('Lighting the Nether portal')
-                await bot.lookAt(centerObsidian.position)
+                await bot.lookAt(centerObsidian.position.offset(0, 1, 0))
                 await bot.activateBlock(centerObsidian)
                 
                 log('Portal lit! Waiting for portal to activate...')
@@ -1271,17 +1298,25 @@ function findStronghold() {
         log('Throwing Eye of Ender...')
         bot.activateItem()
         
-        // Watch where the eye goes and follow it
-        // In a real implementation, we'd track the eye entity
-        // For now, we'll move in the general direction
+        // In a real implementation, we would track the eye entity's trajectory
+        // For this bot, we'll use a simplified approach: search for stronghold blocks underground
+        // After throwing multiple eyes, we'd triangulate the position
         
+        // Move in a general direction (simplified - in reality would follow eye trajectory)
         setTimeout(() => {
-            // Move towards stronghold (simplified - would need eye tracking)
-            log('Following Eye of Ender trajectory')
+            log('Moving towards stronghold area')
             
-            // After several throws, we'd triangulate the position
-            // Simplified: just search underground
-            setTimeout(() => digToStronghold(), 5000)
+            // Move to search for stronghold
+            // In a proper speedrun bot, this would use the eye's flight direction
+            const angle = Math.random() * Math.PI * 2
+            const distance = 100
+            const targetX = Math.floor(bot.entity.position.x + distance * Math.cos(angle))
+            const targetZ = Math.floor(bot.entity.position.z + distance * Math.sin(angle))
+            const goal = new GoalXZ(targetX, targetZ)
+            bot.pathfinder.setGoal(goal)
+            
+            // After movement, start digging down to find stronghold
+            setTimeout(() => digToStronghold(), 8000)
         }, 3000)
     }, 1000)
 }
@@ -1460,8 +1495,7 @@ function destroyEndCrystals() {
             approachAndDestroyCrystal(crystal)
         }
     } else {
-        log('All End crystals destroyed!')
-        state.crystalsDestroyed = 10 // Approximate count
+        log(`All End crystals destroyed! Total: ${state.crystalsDestroyed}`)
         
         // Now fight the dragon
         setTimeout(() => attackEnderDragon(), 2000)
@@ -1471,23 +1505,59 @@ function destroyEndCrystals() {
 function pillarUpToCrystal(crystal) {
     log('Pillaring up to reach End crystal')
     
-    // Use cobblestone to pillar up
-    equipItem("cobblestone", "hand")
-    
-    // Simple pillaring: place blocks below us
-    const pillarHeight = Math.floor(crystal.position.y - bot.entity.position.y)
-    
-    for (let i = 0; i < pillarHeight; i++) {
-        setTimeout(() => {
-            const blockBelow = bot.blockAt(bot.entity.position.offset(0, -1, 0))
-            bot.placeBlock(blockBelow, new Vec3(0, 1, 0))
-            bot.setControlState("jump", true)
-            setTimeout(() => bot.setControlState("jump", false), 100)
-        }, i * 300)
+    // Check if we have cobblestone
+    const cobbleItem = hasItem("cobblestone")
+    if (!cobbleItem) {
+        log('No cobblestone for pillaring - attacking from ground', 'WARN')
+        setTimeout(() => approachAndDestroyCrystal(crystal), 500)
+        return
     }
     
-    // After pillaring, destroy the crystal
-    setTimeout(() => approachAndDestroyCrystal(crystal), pillarHeight * 300 + 1000)
+    equipItem("cobblestone", "hand")
+    
+    // Simple pillaring: jump and place blocks below us
+    const pillarHeight = Math.floor(crystal.position.y - bot.entity.position.y) - 2
+    
+    if (pillarHeight < 1) {
+        // Crystal is close enough, just approach
+        approachAndDestroyCrystal(crystal)
+        return
+    }
+    
+    let placedBlocks = 0
+    
+    const placePillarBlock = () => {
+        if (placedBlocks >= pillarHeight) {
+            log('Pillaring complete - approaching crystal')
+            setTimeout(() => approachAndDestroyCrystal(crystal), 500)
+            return
+        }
+        
+        try {
+            // Look down and place block
+            bot.lookAt(bot.entity.position.offset(0, -1, 0))
+            
+            // Jump and place block below
+            bot.setControlState("jump", true)
+            setTimeout(() => {
+                const blockBelow = bot.blockAt(bot.entity.position.offset(0, -1, 0))
+                if (blockBelow && blockBelow.name === "air") {
+                    bot.placeBlock(blockBelow, new Vec3(0, 1, 0))
+                    placedBlocks++
+                }
+                bot.setControlState("jump", false)
+                
+                // Continue pillaring
+                setTimeout(placePillarBlock, 300)
+            }, 100)
+        } catch (err) {
+            log(`Pillaring error: ${err.message}`, 'ERROR')
+            // Try to continue anyway
+            setTimeout(() => approachAndDestroyCrystal(crystal), 500)
+        }
+    }
+    
+    placePillarBlock()
 }
 
 function approachAndDestroyCrystal(crystal) {
@@ -1505,6 +1575,10 @@ function approachAndDestroyCrystal(crystal) {
         log('Destroying End crystal!')
         bot.lookAt(crystal.position)
         bot.attack(crystal)
+        
+        // Increment counter
+        state.crystalsDestroyed++
+        log(`End crystals destroyed: ${state.crystalsDestroyed}`)
         
         // Continue to next crystal
         setTimeout(() => destroyEndCrystals(), 2000)
@@ -1592,9 +1666,14 @@ function continueAttackingDragon() {
 }
 
 function victorySequence() {
+    const elapsedMs = Date.now() - state.startTime
+    const elapsedSeconds = Math.floor(elapsedMs / 1000)
+    const minutes = Math.floor(elapsedSeconds / 60)
+    const seconds = elapsedSeconds % 60
+    
     log('=== SPEEDRUN COMPLETE! ===', 'STATUS')
     log('Ender Dragon has been defeated!', 'STATUS')
-    log(`Time to completion: ${new Date().toISOString()}`, 'STATUS')
+    log(`SPEEDRUN TIME: ${minutes}m ${seconds}s`, 'STATUS')
     
     // Find and enter the exit portal
     const exitPortalBlock = bot.findBlock({
@@ -1886,6 +1965,10 @@ bot.once("spawn", () => {
     log(`Position: X:${bot.entity.position.x.toFixed(2)} Y:${bot.entity.position.y.toFixed(2)} Z:${bot.entity.position.z.toFixed(2)}`)
     sayItems()
     
+    // Start the speedrun timer!
+    state.startTime = Date.now()
+    log('=== SPEEDRUN TIMER STARTED ===', 'STATUS')
+    
     // Start the speedrun!
     state.current = "goingToVillage"
     log('Starting speedrun - looking for village')
@@ -2065,17 +2148,22 @@ bot.on("forcedMove", () => {
         const currentDimension = bot.game.dimension
         log(`Current dimension: ${currentDimension}`)
         
-        if (currentDimension === 'minecraft:the_nether' || currentDimension === -1) {
+        // Normalize dimension - can be string or number depending on version
+        const isNether = currentDimension === 'minecraft:the_nether' || currentDimension === -1 || currentDimension === 'the_nether'
+        const isOverworld = currentDimension === 'minecraft:overworld' || currentDimension === 0 || currentDimension === 'overworld'
+        const isEnd = currentDimension === 'minecraft:the_end' || currentDimension === 1 || currentDimension === 'the_end'
+        
+        if (isNether) {
             if (!state.inNether && state.current === "lavaPhase") {
                 log('Entered the Nether!')
                 netherPhase()
             }
-        } else if (currentDimension === 'minecraft:overworld' || currentDimension === 0) {
+        } else if (isOverworld) {
             if (state.inNether && state.current === "returningToOverworld") {
                 log('Returned to Overworld!')
                 huntEndermen()
             }
-        } else if (currentDimension === 'minecraft:the_end' || currentDimension === 1) {
+        } else if (isEnd) {
             if (!state.inEnd && state.current === "enteringEnd") {
                 log('Entered The End!')
                 endDragonFight()
@@ -2091,12 +2179,17 @@ bot.on("spawn", () => {
         const currentDimension = bot.game.dimension
         log(`Spawned in dimension: ${currentDimension}`)
         
-        if (currentDimension === 'minecraft:the_nether' || currentDimension === -1) {
+        // Normalize dimension - can be string or number depending on version
+        const isNether = currentDimension === 'minecraft:the_nether' || currentDimension === -1 || currentDimension === 'the_nether'
+        const isOverworld = currentDimension === 'minecraft:overworld' || currentDimension === 0 || currentDimension === 'overworld'
+        const isEnd = currentDimension === 'minecraft:the_end' || currentDimension === 1 || currentDimension === 'the_end'
+        
+        if (isNether) {
             if (!state.inNether && (state.current === "lavaPhase" || state.portalBuilt)) {
                 log('Spawned in Nether after portal travel')
                 netherPhase()
             }
-        } else if (currentDimension === 'minecraft:the_end' || currentDimension === 1) {
+        } else if (isEnd) {
             if (!state.inEnd && state.current === "enteringEnd") {
                 log('Spawned in The End')
                 endDragonFight()
