@@ -22,6 +22,9 @@ const state = {
     previous: 'initializing',
     doing: false,
     
+    // Timing
+    startTime: null,
+    
     // Village phase
     atVillage: false,
     villageSearching: false,
@@ -64,7 +67,31 @@ const state = {
     goingToGolem: false,
     goingToIron: false,
     goingToFlint: false,
-    gettingWater: false
+    gettingWater: false,
+    
+    // Portal phase
+    portalBuilt: false,
+    inNether: false,
+    
+    // Nether phase
+    blazeRods: 0,
+    netherFortressFound: false,
+    blazePowder: 0,
+    
+    // Ender pearl phase
+    enderPearls: 0,
+    eyesOfEnder: 0,
+    
+    // Stronghold phase
+    strongholdFound: false,
+    strongholdLocation: null,
+    inStronghold: false,
+    portalRoomFound: false,
+    
+    // End phase
+    inEnd: false,
+    crystalsDestroyed: 0,
+    dragonDefeated: false
 }
 
 let mcData = null
@@ -825,6 +852,844 @@ function findLava() {
     }
 }
 
+async function buildNetherPortal() {
+    log('Building Nether portal')
+    
+    // Find a suitable flat location near lava
+    const lavaPositions = bot.findBlocks({
+        matching: mcData.blocksByName["lava"].id,
+        maxDistance: 32,
+        count: 10
+    })
+    
+    if (lavaPositions.length === 0) {
+        log('No lava found to build portal', 'ERROR')
+        setTimeout(() => findLava(), 5000)
+        return
+    }
+    
+    // Build portal using the water bucket on lava method
+    const lavaPos = lavaPositions[0]
+    log(`Building portal near lava at ${lavaPos}`)
+    
+    try {
+        // Strategy: Place water source blocks to flow onto lava and create obsidian
+        // This is the standard speedrun technique for portal building
+        
+        equipItem("water_bucket", "hand")
+        await bot.waitForTicks(20)
+        
+        log('Placing water to create obsidian from lava')
+        
+        // Place water near lava pool - it will flow and create obsidian
+        const nearbyLavaBlock = bot.blockAt(lavaPos)
+        if (nearbyLavaBlock) {
+            try {
+                // Find an adjacent air block to place water
+                const adjacentPositions = [
+                    lavaPos.offset(1, 0, 0),
+                    lavaPos.offset(-1, 0, 0),
+                    lavaPos.offset(0, 0, 1),
+                    lavaPos.offset(0, 0, -1),
+                    lavaPos.offset(0, 1, 0)
+                ]
+                
+                for (const pos of adjacentPositions) {
+                    const block = bot.blockAt(pos)
+                    if (block && block.name === 'air') {
+                        await bot.lookAt(pos)
+                        await bot.placeBlock(block, new Vec3(0, -1, 0))
+                        log('Water placed - waiting for obsidian formation')
+                        break
+                    }
+                }
+            } catch (err) {
+                log(`Water placement error: ${err.message}`, 'WARN')
+            }
+        }
+        
+        // Wait for water to flow and create obsidian
+        await bot.waitForTicks(100) // Wait 5 seconds for obsidian formation
+        
+        // Check if we have obsidian blocks nearby
+        const obsidianBlocks = bot.findBlocks({
+            matching: mcData.blocksByName["obsidian"].id,
+            maxDistance: 16,
+            count: 10
+        })
+        
+        if (obsidianBlocks.length >= 10) {
+            log(`Found ${obsidianBlocks.length} obsidian blocks - attempting to light portal`)
+            
+            // Light the portal
+            equipItem("flint_and_steel", "hand")
+            await bot.waitForTicks(20)
+            
+            // Find a suitable obsidian block to light from (should be part of the frame)
+            const centerObsidian = bot.blockAt(obsidianBlocks[0])
+            if (centerObsidian) {
+                log('Lighting the Nether portal')
+                await bot.lookAt(centerObsidian.position.offset(0, 1, 0))
+                await bot.activateBlock(centerObsidian)
+                
+                log('Portal lit! Waiting for portal to activate...')
+                state.portalBuilt = true
+                
+                // Enter the portal
+                setTimeout(() => enterNetherPortal(), 3000)
+            }
+        } else {
+            log('Not enough obsidian created, retrying...', 'WARN')
+            setTimeout(() => buildNetherPortal(), 5000)
+        }
+        
+    } catch (err) {
+        log(`Portal building error: ${err.message}`, 'ERROR')
+        // Retry after error
+        setTimeout(() => buildNetherPortal(), 5000)
+    }
+}
+
+function enterNetherPortal() {
+    log('Entering Nether portal...')
+    
+    const portalBlock = bot.findBlock({
+        matching: mcData.blocksByName["nether_portal"]?.id,
+        maxDistance: 16
+    })
+    
+    if (portalBlock) {
+        log(`Portal found at ${portalBlock.position}`)
+        const goal = new GoalBlock(portalBlock.position.x, portalBlock.position.y, portalBlock.position.z)
+        bot.pathfinder.setGoal(goal)
+    } else {
+        log('Portal block not found, retrying...', 'WARN')
+        setTimeout(() => enterNetherPortal(), 2000)
+    }
+}
+
+// ============================================================================
+// NETHER PHASE FUNCTIONS
+// ============================================================================
+
+function netherPhase() {
+    log('Entered Nether - beginning fortress search')
+    state.current = "netherPhase"
+    state.inNether = true
+    
+    // Wait a moment to fully load in Nether
+    setTimeout(() => {
+        findNetherFortress()
+    }, 3000)
+}
+
+function findNetherFortress() {
+    log('Searching for Nether fortress')
+    
+    // Look for fortress blocks: nether bricks, nether brick fence, nether brick stairs
+    const fortressBlocks = bot.findBlocks({
+        matching: [
+            mcData.blocksByName["nether_bricks"]?.id,
+            mcData.blocksByName["nether_brick_fence"]?.id,
+            mcData.blocksByName["nether_brick_stairs"]?.id
+        ].filter(id => id !== undefined),
+        maxDistance: 128,
+        count: 20
+    })
+    
+    if (fortressBlocks && fortressBlocks.length > 5) {
+        log(`Found Nether fortress! ${fortressBlocks.length} blocks detected`)
+        state.netherFortressFound = true
+        
+        // Calculate center of fortress blocks
+        let centerX = 0, centerY = 0, centerZ = 0
+        fortressBlocks.forEach(pos => {
+            centerX += pos.x
+            centerY += pos.y
+            centerZ += pos.z
+        })
+        centerX = Math.floor(centerX / fortressBlocks.length)
+        centerY = Math.floor(centerY / fortressBlocks.length)
+        centerZ = Math.floor(centerZ / fortressBlocks.length)
+        
+        log(`Moving to fortress center at X:${centerX} Y:${centerY} Z:${centerZ}`)
+        const goal = new GoalNear(centerX, centerY, centerZ, 8)
+        bot.pathfinder.setGoal(goal)
+        
+        setTimeout(() => findBlazes(), 5000)
+    } else {
+        log('No fortress found nearby, continuing search')
+        
+        // Move in Nether to search for fortress
+        const angle = Math.random() * Math.PI * 2
+        const distance = 64
+        const targetX = Math.floor(bot.entity.position.x + distance * Math.cos(angle))
+        const targetZ = Math.floor(bot.entity.position.z + distance * Math.sin(angle))
+        const goal = new GoalXZ(targetX, targetZ)
+        bot.pathfinder.setGoal(goal)
+        
+        setTimeout(() => findNetherFortress(), 10000)
+    }
+}
+
+let blazeTarget = null
+let blazeAttackAttempts = 0
+const MAX_BLAZE_ATTACKS = 100
+
+function findBlazes() {
+    log('Searching for blazes in fortress')
+    
+    const filter = e => e.type === 'mob' && 
+                        e.position.distanceTo(bot.entity.position) < 64 &&
+                        e.name === "blaze"
+    
+    const blaze = bot.nearestEntity(filter)
+    
+    if (blaze) {
+        log(`Blaze found at ${blaze.position}`)
+        blazeTarget = blaze
+        attackBlaze()
+    } else {
+        log('No blaze found, searching...', 'WARN')
+        
+        // Move around fortress to find blazes
+        const angle = Math.random() * Math.PI * 2
+        const distance = 20
+        const targetX = Math.floor(bot.entity.position.x + distance * Math.cos(angle))
+        const targetZ = Math.floor(bot.entity.position.z + distance * Math.sin(angle))
+        const goal = new GoalXZ(targetX, targetZ)
+        bot.pathfinder.setGoal(goal)
+        
+        setTimeout(() => findBlazes(), 5000)
+    }
+}
+
+function attackBlaze() {
+    if (!blazeTarget || blazeAttackAttempts >= MAX_BLAZE_ATTACKS) {
+        log('Blaze target lost or max attempts reached')
+        blazeAttackAttempts = 0
+        
+        // Check if we have enough blaze rods
+        const blazeRodItem = hasItem("blaze_rod")
+        if (blazeRodItem) {
+            state.blazeRods = blazeRodItem.count
+            log(`Collected ${state.blazeRods} blaze rods`)
+        }
+        
+        if (state.blazeRods >= 6) {
+            log('Sufficient blaze rods collected!')
+            returnToOverworld()
+        } else {
+            log(`Need more blaze rods (${state.blazeRods}/6)`)
+            setTimeout(() => findBlazes(), 2000)
+        }
+        return
+    }
+    
+    const dist = distance(blazeTarget.position, bot.entity.position)
+    
+    if (dist > 4) {
+        // Move closer to blaze
+        const goal = new GoalNear(blazeTarget.position.x, blazeTarget.position.y, blazeTarget.position.z, 3)
+        bot.pathfinder.setGoal(goal)
+        setTimeout(() => attackBlaze(), 500)
+    } else {
+        // Attack the blaze
+        equipItem("stone_axe", "hand")
+        bot.lookAt(blazeTarget.position.offset(0, 1, 0))
+        
+        // Jump attack for critical hits
+        bot.setControlState("jump", true)
+        setTimeout(() => bot.setControlState("jump", false), 100)
+        
+        bot.attack(blazeTarget)
+        blazeAttackAttempts++
+        
+        // Eat if health is low
+        if (bot.health < 12 && hasItem("bread")) {
+            try {
+                bot.equip(hasItem("bread"), "hand")
+                bot.activateItem()
+                equipItem("stone_axe", "hand")
+            } catch (err) {
+                log(`Failed to eat: ${err.message}`, 'ERROR')
+            }
+        }
+        
+        setTimeout(() => attackBlaze(), 500)
+    }
+}
+
+function returnToOverworld() {
+    log('Returning to Overworld through portal')
+    state.current = "returningToOverworld"
+    
+    // Find the nether portal
+    const portalBlock = bot.findBlock({
+        matching: mcData.blocksByName["nether_portal"]?.id,
+        maxDistance: 128
+    })
+    
+    if (portalBlock) {
+        log(`Portal found at ${portalBlock.position}`)
+        const goal = new GoalBlock(portalBlock.position.x, portalBlock.position.y, portalBlock.position.z)
+        bot.pathfinder.setGoal(goal)
+    } else {
+        log('Portal not found, searching...', 'WARN')
+        
+        // Move towards where we entered
+        const angle = Math.random() * Math.PI * 2
+        const distance = 32
+        const targetX = Math.floor(bot.entity.position.x + distance * Math.cos(angle))
+        const targetZ = Math.floor(bot.entity.position.z + distance * Math.sin(angle))
+        const goal = new GoalXZ(targetX, targetZ)
+        bot.pathfinder.setGoal(goal)
+        
+        setTimeout(() => returnToOverworld(), 5000)
+    }
+}
+
+// ============================================================================
+// ENDERMAN HUNTING FUNCTIONS
+// ============================================================================
+
+function huntEndermen() {
+    log('Starting Enderman hunting phase')
+    state.current = "huntingEndermen"
+    state.inNether = false
+    
+    // Craft blaze powder first
+    const blazeRodItem = hasItem("blaze_rod")
+    if (blazeRodItem) {
+        log('Crafting blaze powder from blaze rods')
+        craftBasic("blaze_powder", blazeRodItem.count * 2)
+        state.blazePowder = blazeRodItem.count * 2
+    }
+    
+    setTimeout(() => findEnderman(), 2000)
+}
+
+let endermanTarget = null
+let endermanAttackAttempts = 0
+const MAX_ENDERMAN_ATTACKS = 100
+
+function findEnderman() {
+    log('Searching for Enderman')
+    
+    const filter = e => e.type === 'mob' && 
+                        e.position.distanceTo(bot.entity.position) < 64 &&
+                        e.name === "enderman"
+    
+    const enderman = bot.nearestEntity(filter)
+    
+    if (enderman) {
+        log(`Enderman found at ${enderman.position}`)
+        endermanTarget = enderman
+        attackEnderman()
+    } else {
+        log('No enderman found, searching at night...', 'WARN')
+        
+        // Move to find endermen (they spawn at night in various biomes)
+        const angle = Math.random() * Math.PI * 2
+        const distance = 40
+        const targetX = Math.floor(bot.entity.position.x + distance * Math.cos(angle))
+        const targetZ = Math.floor(bot.entity.position.z + distance * Math.sin(angle))
+        const goal = new GoalXZ(targetX, targetZ)
+        bot.pathfinder.setGoal(goal)
+        
+        setTimeout(() => findEnderman(), 5000)
+    }
+}
+
+function attackEnderman() {
+    if (!endermanTarget || endermanAttackAttempts >= MAX_ENDERMAN_ATTACKS) {
+        log('Enderman target lost or max attempts reached')
+        endermanAttackAttempts = 0
+        
+        // Check ender pearl count
+        const enderPearlItem = hasItem("ender_pearl")
+        if (enderPearlItem) {
+            state.enderPearls = enderPearlItem.count
+            log(`Collected ${state.enderPearls} ender pearls`)
+        }
+        
+        if (state.enderPearls >= 12) {
+            log('Sufficient ender pearls collected!')
+            craftEyesOfEnder()
+        } else {
+            log(`Need more ender pearls (${state.enderPearls}/12)`)
+            setTimeout(() => findEnderman(), 2000)
+        }
+        return
+    }
+    
+    const dist = distance(endermanTarget.position, bot.entity.position)
+    
+    if (dist > 4) {
+        // Move closer to enderman
+        const goal = new GoalNear(endermanTarget.position.x, endermanTarget.position.y, endermanTarget.position.z, 3)
+        bot.pathfinder.setGoal(goal)
+        setTimeout(() => attackEnderman(), 500)
+    } else {
+        // Look at and attack the enderman to provoke it
+        bot.lookAt(endermanTarget.position.offset(0, 1.5, 0))
+        equipItem("stone_axe", "hand")
+        
+        // Jump attack for critical hits
+        bot.setControlState("jump", true)
+        setTimeout(() => bot.setControlState("jump", false), 100)
+        
+        bot.attack(endermanTarget)
+        endermanAttackAttempts++
+        
+        // Eat if health is low
+        if (bot.health < 12 && hasItem("bread")) {
+            try {
+                bot.equip(hasItem("bread"), "hand")
+                bot.activateItem()
+                equipItem("stone_axe", "hand")
+            } catch (err) {
+                log(`Failed to eat: ${err.message}`, 'ERROR')
+            }
+        }
+        
+        setTimeout(() => attackEnderman(), 500)
+    }
+}
+
+function craftEyesOfEnder() {
+    log('Crafting Eyes of Ender')
+    
+    const enderPearlItem = hasItem("ender_pearl")
+    const blazePowderItem = hasItem("blaze_powder")
+    
+    if (enderPearlItem && blazePowderItem) {
+        const craftCount = Math.min(enderPearlItem.count, blazePowderItem.count)
+        log(`Crafting ${craftCount} Eyes of Ender`)
+        
+        craftBasic("ender_eye", craftCount)
+        state.eyesOfEnder = craftCount
+        
+        setTimeout(() => findStronghold(), 2000)
+    } else {
+        log('Missing materials for Eyes of Ender', 'ERROR')
+    }
+}
+
+// ============================================================================
+// STRONGHOLD FINDING FUNCTIONS
+// ============================================================================
+
+function findStronghold() {
+    log('Using Eye of Ender to locate stronghold')
+    state.current = "findingStronghold"
+    
+    const eyeOfEnder = hasItem("ender_eye")
+    
+    if (!eyeOfEnder) {
+        log('No Eyes of Ender available!', 'ERROR')
+        return
+    }
+    
+    // Equip and use eye of ender
+    equipItem("ender_eye", "hand")
+    
+    setTimeout(() => {
+        log('Throwing Eye of Ender...')
+        bot.activateItem()
+        
+        // In a real implementation, we would track the eye entity's trajectory
+        // For this bot, we'll use a simplified approach: search for stronghold blocks underground
+        // After throwing multiple eyes, we'd triangulate the position
+        
+        // Move in a general direction (simplified - in reality would follow eye trajectory)
+        setTimeout(() => {
+            log('Moving towards stronghold area')
+            
+            // Move to search for stronghold
+            // In a proper speedrun bot, this would use the eye's flight direction
+            const angle = Math.random() * Math.PI * 2
+            const distance = 100
+            const targetX = Math.floor(bot.entity.position.x + distance * Math.cos(angle))
+            const targetZ = Math.floor(bot.entity.position.z + distance * Math.sin(angle))
+            const goal = new GoalXZ(targetX, targetZ)
+            bot.pathfinder.setGoal(goal)
+            
+            // After movement, start digging down to find stronghold
+            setTimeout(() => digToStronghold(), 8000)
+        }, 3000)
+    }, 1000)
+}
+
+function digToStronghold() {
+    log('Digging down to find stronghold')
+    state.current = "diggingToStronghold"
+    
+    // Look for stronghold blocks underground
+    const strongholdBlocks = bot.findBlocks({
+        matching: [
+            mcData.blocksByName["stone_bricks"]?.id,
+            mcData.blocksByName["mossy_stone_bricks"]?.id,
+            mcData.blocksByName["cracked_stone_bricks"]?.id,
+            mcData.blocksByName["iron_bars"]?.id
+        ].filter(id => id !== undefined),
+        maxDistance: 64,
+        count: 10
+    })
+    
+    if (strongholdBlocks && strongholdBlocks.length > 5) {
+        log(`Found stronghold blocks! ${strongholdBlocks.length} blocks detected`)
+        state.strongholdFound = true
+        state.inStronghold = true
+        
+        // Move into stronghold
+        const centerX = Math.floor(strongholdBlocks.reduce((sum, pos) => sum + pos.x, 0) / strongholdBlocks.length)
+        const centerY = Math.floor(strongholdBlocks.reduce((sum, pos) => sum + pos.y, 0) / strongholdBlocks.length)
+        const centerZ = Math.floor(strongholdBlocks.reduce((sum, pos) => sum + pos.z, 0) / strongholdBlocks.length)
+        
+        state.strongholdLocation = new Vec3(centerX, centerY, centerZ)
+        log(`Moving to stronghold at X:${centerX} Y:${centerY} Z:${centerZ}`)
+        
+        const goal = new GoalNear(centerX, centerY, centerZ, 5)
+        bot.pathfinder.setGoal(goal)
+        
+        setTimeout(() => findPortalRoom(), 5000)
+    } else {
+        log('No stronghold blocks found, continuing search')
+        
+        // Dig down or search more
+        const angle = Math.random() * Math.PI * 2
+        const distance = 20
+        const targetX = Math.floor(bot.entity.position.x + distance * Math.cos(angle))
+        const targetZ = Math.floor(bot.entity.position.z + distance * Math.sin(angle))
+        const goal = new GoalXZ(targetX, targetZ)
+        bot.pathfinder.setGoal(goal)
+        
+        setTimeout(() => digToStronghold(), 8000)
+    }
+}
+
+function findPortalRoom() {
+    log('Searching for End Portal room')
+    
+    // Look for End portal frame blocks
+    const portalFrameBlocks = bot.findBlocks({
+        matching: mcData.blocksByName["end_portal_frame"]?.id,
+        maxDistance: 64,
+        count: 12
+    })
+    
+    if (portalFrameBlocks && portalFrameBlocks.length >= 12) {
+        log(`Found End Portal! ${portalFrameBlocks.length} frame blocks detected`)
+        state.portalRoomFound = true
+        
+        // Move to portal
+        const centerX = Math.floor(portalFrameBlocks.reduce((sum, pos) => sum + pos.x, 0) / portalFrameBlocks.length)
+        const centerY = Math.floor(portalFrameBlocks.reduce((sum, pos) => sum + pos.y, 0) / portalFrameBlocks.length)
+        const centerZ = Math.floor(portalFrameBlocks.reduce((sum, pos) => sum + pos.z, 0) / portalFrameBlocks.length)
+        
+        log(`Moving to End Portal at X:${centerX} Y:${centerY} Z:${centerZ}`)
+        const goal = new GoalNear(centerX, centerY, centerZ, 3)
+        bot.pathfinder.setGoal(goal)
+        
+        setTimeout(() => fillEndPortal(portalFrameBlocks), 3000)
+    } else {
+        log('Portal room not found, continuing search in stronghold')
+        
+        // Navigate through stronghold
+        const angle = Math.random() * Math.PI * 2
+        const distance = 15
+        const targetX = Math.floor(bot.entity.position.x + distance * Math.cos(angle))
+        const targetZ = Math.floor(bot.entity.position.z + distance * Math.sin(angle))
+        const goal = new GoalXZ(targetX, targetZ)
+        bot.pathfinder.setGoal(goal)
+        
+        setTimeout(() => findPortalRoom(), 5000)
+    }
+}
+
+function fillEndPortal(portalFrameBlocks) {
+    log('Filling End Portal with Eyes of Ender')
+    
+    // Check each frame block and fill if needed
+    let filled = 0
+    
+    portalFrameBlocks.forEach((pos, index) => {
+        const block = bot.blockAt(pos)
+        
+        // Check if frame already has an eye (metadata check)
+        // In Minecraft, filled frames have different properties
+        setTimeout(() => {
+            equipItem("ender_eye", "hand")
+            
+            // Place eye of ender on frame
+            bot.lookAt(pos)
+            setTimeout(() => {
+                bot.activateBlock(block)
+                filled++
+                log(`Placed Eye of Ender ${filled}/12`)
+                
+                if (filled >= 12) {
+                    log('All eyes placed! Portal should be active')
+                    setTimeout(() => enterTheEnd(), 2000)
+                }
+            }, 200)
+        }, index * 500)
+    })
+}
+
+function enterTheEnd() {
+    log('Entering The End dimension!')
+    state.current = "enteringEnd"
+    
+    // Find the activated End portal
+    const endPortalBlock = bot.findBlock({
+        matching: mcData.blocksByName["end_portal"]?.id,
+        maxDistance: 16
+    })
+    
+    if (endPortalBlock) {
+        log(`End portal found at ${endPortalBlock.position}`)
+        const goal = new GoalBlock(endPortalBlock.position.x, endPortalBlock.position.y, endPortalBlock.position.z)
+        bot.pathfinder.setGoal(goal)
+    } else {
+        log('End portal not activated yet, waiting...', 'WARN')
+        setTimeout(() => enterTheEnd(), 2000)
+    }
+}
+
+// ============================================================================
+// ENDER DRAGON FIGHT FUNCTIONS
+// ============================================================================
+
+function endDragonFight() {
+    log('=== ENTERED THE END - DRAGON FIGHT BEGINS ===')
+    state.current = "fightingDragon"
+    state.inEnd = true
+    
+    // First priority: destroy End crystals
+    setTimeout(() => destroyEndCrystals(), 3000)
+}
+
+function destroyEndCrystals() {
+    log('Destroying End crystals on obsidian pillars')
+    
+    // Look for End crystals
+    const crystalFilter = e => e.type === 'object' && 
+                                e.name === "end_crystal" &&
+                                e.position.distanceTo(bot.entity.position) < 128
+    
+    const crystal = bot.nearestEntity(crystalFilter)
+    
+    if (crystal) {
+        log(`End crystal found at ${crystal.position}`)
+        
+        // Pillar up if crystal is high
+        const heightDiff = crystal.position.y - bot.entity.position.y
+        
+        if (heightDiff > 10) {
+            log(`Crystal is high (${heightDiff} blocks up), pillaring...`)
+            pillarUpToCrystal(crystal)
+        } else {
+            // Shoot or approach and destroy
+            approachAndDestroyCrystal(crystal)
+        }
+    } else {
+        log(`All End crystals destroyed! Total: ${state.crystalsDestroyed}`)
+        
+        // Now fight the dragon
+        setTimeout(() => attackEnderDragon(), 2000)
+    }
+}
+
+function pillarUpToCrystal(crystal) {
+    log('Pillaring up to reach End crystal')
+    
+    // Check if we have cobblestone
+    const cobbleItem = hasItem("cobblestone")
+    if (!cobbleItem) {
+        log('No cobblestone for pillaring - attacking from ground', 'WARN')
+        setTimeout(() => approachAndDestroyCrystal(crystal), 500)
+        return
+    }
+    
+    equipItem("cobblestone", "hand")
+    
+    // Simple pillaring: jump and place blocks below us
+    const pillarHeight = Math.floor(crystal.position.y - bot.entity.position.y) - 2
+    
+    if (pillarHeight < 1) {
+        // Crystal is close enough, just approach
+        approachAndDestroyCrystal(crystal)
+        return
+    }
+    
+    let placedBlocks = 0
+    
+    const placePillarBlock = () => {
+        if (placedBlocks >= pillarHeight) {
+            log('Pillaring complete - approaching crystal')
+            setTimeout(() => approachAndDestroyCrystal(crystal), 500)
+            return
+        }
+        
+        try {
+            // Look down and place block
+            bot.lookAt(bot.entity.position.offset(0, -1, 0))
+            
+            // Jump and place block below
+            bot.setControlState("jump", true)
+            setTimeout(() => {
+                const blockBelow = bot.blockAt(bot.entity.position.offset(0, -1, 0))
+                if (blockBelow && blockBelow.name === "air") {
+                    bot.placeBlock(blockBelow, new Vec3(0, 1, 0))
+                    placedBlocks++
+                }
+                bot.setControlState("jump", false)
+                
+                // Continue pillaring
+                setTimeout(placePillarBlock, 300)
+            }, 100)
+        } catch (err) {
+            log(`Pillaring error: ${err.message}`, 'ERROR')
+            // Try to continue anyway
+            setTimeout(() => approachAndDestroyCrystal(crystal), 500)
+        }
+    }
+    
+    placePillarBlock()
+}
+
+function approachAndDestroyCrystal(crystal) {
+    log(`Approaching End crystal at ${crystal.position}`)
+    
+    const dist = distance(crystal.position, bot.entity.position)
+    
+    if (dist > 8) {
+        const goal = new GoalNear(crystal.position.x, crystal.position.y, crystal.position.z, 6)
+        bot.pathfinder.setGoal(goal)
+        
+        setTimeout(() => approachAndDestroyCrystal(crystal), 1000)
+    } else {
+        // Attack the crystal
+        log('Destroying End crystal!')
+        bot.lookAt(crystal.position)
+        bot.attack(crystal)
+        
+        // Increment counter
+        state.crystalsDestroyed++
+        log(`End crystals destroyed: ${state.crystalsDestroyed}`)
+        
+        // Continue to next crystal
+        setTimeout(() => destroyEndCrystals(), 2000)
+    }
+}
+
+let dragonTarget = null
+let dragonAttackAttempts = 0
+const MAX_DRAGON_ATTACKS = 500
+
+function attackEnderDragon() {
+    log('Attacking Ender Dragon!')
+    
+    const dragonFilter = e => e.type === 'mob' && 
+                               e.name === "ender_dragon"
+    
+    const dragon = bot.nearestEntity(dragonFilter)
+    
+    if (!dragon) {
+        log('Dragon not found, waiting...', 'WARN')
+        setTimeout(() => attackEnderDragon(), 1000)
+        return
+    }
+    
+    dragonTarget = dragon
+    log(`Dragon located at ${dragon.position}`)
+    
+    continueAttackingDragon()
+}
+
+function continueAttackingDragon() {
+    if (!dragonTarget || dragonAttackAttempts >= MAX_DRAGON_ATTACKS) {
+        // Check if dragon is defeated
+        const dragonFilter = e => e.type === 'mob' && e.name === "ender_dragon"
+        const dragon = bot.nearestEntity(dragonFilter)
+        
+        if (!dragon) {
+            log('=== ENDER DRAGON DEFEATED! ===', 'STATUS')
+            state.dragonDefeated = true
+            victorySequence()
+            return
+        }
+        
+        dragonAttackAttempts = 0
+        dragonTarget = dragon
+    }
+    
+    const dist = distance(dragonTarget.position, bot.entity.position)
+    
+    // Attack when dragon is perched or close
+    if (dist < 20) {
+        log('Dragon in range - attacking!')
+        equipItem("stone_axe", "hand")
+        bot.lookAt(dragonTarget.position.offset(0, 1, 0))
+        
+        // Jump and attack for critical hits
+        bot.setControlState("jump", true)
+        setTimeout(() => bot.setControlState("jump", false), 100)
+        
+        bot.attack(dragonTarget)
+        dragonAttackAttempts++
+    } else {
+        log(`Dragon far away (${dist.toFixed(1)} blocks), waiting for perch...`)
+        
+        // Move towards dragon's general area
+        if (dist > 50) {
+            const goal = new GoalNear(dragonTarget.position.x, dragonTarget.position.y, dragonTarget.position.z, 20)
+            bot.pathfinder.setGoal(goal)
+        }
+    }
+    
+    // Eat if health is low
+    if (bot.health < 15 && hasItem("bread")) {
+        log('Combat healing - eating bread')
+        try {
+            bot.equip(hasItem("bread"), "hand")
+            bot.activateItem()
+        } catch (err) {
+            log(`Failed to eat: ${err.message}`, 'ERROR')
+        }
+    }
+    
+    // Continue attacking
+    setTimeout(() => continueAttackingDragon(), 800)
+}
+
+function victorySequence() {
+    const elapsedMs = Date.now() - state.startTime
+    const elapsedSeconds = Math.floor(elapsedMs / 1000)
+    const minutes = Math.floor(elapsedSeconds / 60)
+    const seconds = elapsedSeconds % 60
+    
+    log('=== SPEEDRUN COMPLETE! ===', 'STATUS')
+    log('Ender Dragon has been defeated!', 'STATUS')
+    log(`SPEEDRUN TIME: ${minutes}m ${seconds}s`, 'STATUS')
+    
+    // Find and enter the exit portal
+    const exitPortalBlock = bot.findBlock({
+        matching: mcData.blocksByName["end_portal"]?.id,
+        maxDistance: 64
+    })
+    
+    if (exitPortalBlock) {
+        log('Entering exit portal...')
+        const goal = new GoalBlock(exitPortalBlock.position.x, exitPortalBlock.position.y, exitPortalBlock.position.z)
+        bot.pathfinder.setGoal(goal)
+    }
+    
+    log('=== MINECRAFT SPEEDRUN BOT: MISSION ACCOMPLISHED! ===', 'STATUS')
+}
+
 // ============================================================================
 // INVENTORY MANAGEMENT
 // ============================================================================
@@ -898,6 +1763,55 @@ function transitionState() {
                     state.current = "lavaPhase"
                     log(`State transition: ${oldState} -> ${state.current}`)
                 }, 1500)
+            }
+            break
+            
+        case "lavaPhase":
+            if (state.portalBuilt) {
+                state.current = "netherPhase"
+                log(`State transition: ${oldState} -> ${state.current}`)
+            }
+            break
+            
+        case "netherPhase":
+            if (state.blazeRods >= 6) {
+                state.current = "returningToOverworld"
+                log(`State transition: ${oldState} -> ${state.current}`)
+            }
+            break
+            
+        case "returningToOverworld":
+            if (!state.inNether) {
+                state.current = "huntingEndermen"
+                log(`State transition: ${oldState} -> ${state.current}`)
+            }
+            break
+            
+        case "huntingEndermen":
+            if (state.eyesOfEnder >= 12) {
+                state.current = "findingStronghold"
+                log(`State transition: ${oldState} -> ${state.current}`)
+            }
+            break
+            
+        case "findingStronghold":
+            if (state.strongholdFound) {
+                state.current = "diggingToStronghold"
+                log(`State transition: ${oldState} -> ${state.current}`)
+            }
+            break
+            
+        case "diggingToStronghold":
+            if (state.portalRoomFound) {
+                state.current = "enteringEnd"
+                log(`State transition: ${oldState} -> ${state.current}`)
+            }
+            break
+            
+        case "enteringEnd":
+            if (state.inEnd) {
+                state.current = "fightingDragon"
+                log(`State transition: ${oldState} -> ${state.current}`)
             }
             break
     }
@@ -988,6 +1902,46 @@ function chooseAction() {
             log('Action: Finding lava for portal')
             findLava()
             break
+            
+        case "netherPhase":
+            if (!state.netherFortressFound) {
+                log('Action: Finding Nether fortress')
+                findNetherFortress()
+            } else if (state.blazeRods < 6) {
+                log('Action: Hunting blazes')
+                findBlazes()
+            }
+            break
+            
+        case "returningToOverworld":
+            log('Action: Returning through portal')
+            returnToOverworld()
+            break
+            
+        case "huntingEndermen":
+            log('Action: Hunting endermen')
+            findEnderman()
+            break
+            
+        case "findingStronghold":
+            log('Action: Using Eyes of Ender')
+            findStronghold()
+            break
+            
+        case "diggingToStronghold":
+            log('Action: Searching for stronghold')
+            digToStronghold()
+            break
+            
+        case "enteringEnd":
+            log('Action: Entering The End')
+            enterTheEnd()
+            break
+            
+        case "fightingDragon":
+            log('Action: Fighting Ender Dragon')
+            // Dragon fight continues automatically
+            break
     }
 }
 
@@ -1010,6 +1964,10 @@ bot.once("spawn", () => {
     log('Bot initialized successfully')
     log(`Position: X:${bot.entity.position.x.toFixed(2)} Y:${bot.entity.position.y.toFixed(2)} Z:${bot.entity.position.z.toFixed(2)}`)
     sayItems()
+    
+    // Start the speedrun timer!
+    state.startTime = Date.now()
+    log('=== SPEEDRUN TIMER STARTED ===', 'STATUS')
     
     // Start the speedrun!
     state.current = "goingToVillage"
@@ -1132,6 +2090,19 @@ bot.on("goal_reached", () => {
             }
             break
             
+        case "lavaPhase":
+            log('Reached lava pool - building portal')
+            setTimeout(() => buildNetherPortal(), 1000)
+            break
+            
+        case "netherPhase":
+            // Handled in specific functions
+            break
+            
+        case "returningToOverworld":
+            // Portal reached, waiting for dimension change
+            break
+            
         case "doing":
             state.doing = false
             break
@@ -1159,6 +2130,71 @@ bot.on("entityGone", e => {
         log('Iron golem entity gone')
         state.iron_golem_target = null
         attackIronGolem()
+    } else if (e === blazeTarget) {
+        log('Blaze entity gone')
+        blazeTarget = null
+    } else if (e === endermanTarget) {
+        log('Enderman entity gone')
+        endermanTarget = null
+    }
+})
+
+// Handle dimension changes
+bot.on("forcedMove", () => {
+    log('Position changed (possibly dimension travel)')
+    
+    // Check current dimension
+    setTimeout(() => {
+        const currentDimension = bot.game.dimension
+        log(`Current dimension: ${currentDimension}`)
+        
+        // Normalize dimension - can be string or number depending on version
+        const isNether = currentDimension === 'minecraft:the_nether' || currentDimension === -1 || currentDimension === 'the_nether'
+        const isOverworld = currentDimension === 'minecraft:overworld' || currentDimension === 0 || currentDimension === 'overworld'
+        const isEnd = currentDimension === 'minecraft:the_end' || currentDimension === 1 || currentDimension === 'the_end'
+        
+        if (isNether) {
+            if (!state.inNether && state.current === "lavaPhase") {
+                log('Entered the Nether!')
+                netherPhase()
+            }
+        } else if (isOverworld) {
+            if (state.inNether && state.current === "returningToOverworld") {
+                log('Returned to Overworld!')
+                huntEndermen()
+            }
+        } else if (isEnd) {
+            if (!state.inEnd && state.current === "enteringEnd") {
+                log('Entered The End!')
+                endDragonFight()
+            }
+        }
+    }, 2000)
+})
+
+// Handle spawn events (including dimension changes)
+bot.on("spawn", () => {
+    // Check if this is initial spawn or dimension change
+    if (mcData) {
+        const currentDimension = bot.game.dimension
+        log(`Spawned in dimension: ${currentDimension}`)
+        
+        // Normalize dimension - can be string or number depending on version
+        const isNether = currentDimension === 'minecraft:the_nether' || currentDimension === -1 || currentDimension === 'the_nether'
+        const isOverworld = currentDimension === 'minecraft:overworld' || currentDimension === 0 || currentDimension === 'overworld'
+        const isEnd = currentDimension === 'minecraft:the_end' || currentDimension === 1 || currentDimension === 'the_end'
+        
+        if (isNether) {
+            if (!state.inNether && (state.current === "lavaPhase" || state.portalBuilt)) {
+                log('Spawned in Nether after portal travel')
+                netherPhase()
+            }
+        } else if (isEnd) {
+            if (!state.inEnd && state.current === "enteringEnd") {
+                log('Spawned in The End')
+                endDragonFight()
+            }
+        }
     }
 })
 
@@ -1171,8 +2207,25 @@ bot.on("health", () => {
         // Try to eat bread if available
         if (hasItem("bread")) {
             log('Eating bread to restore health')
-            bot.equip(hasItem("bread"), "hand")
-            bot.activateItem()
+            try {
+                bot.equip(hasItem("bread"), "hand")
+                bot.activateItem()
+            } catch (err) {
+                log(`Failed to eat: ${err.message}`, 'ERROR')
+            }
+        }
+    }
+    
+    // Eat when food is low (during combat especially)
+    if (bot.food < 10 && (state.current === "fightingDragon" || state.current === "netherPhase" || state.current === "huntingEndermen")) {
+        if (hasItem("bread")) {
+            log('Food low - eating bread')
+            try {
+                bot.equip(hasItem("bread"), "hand")
+                bot.activateItem()
+            } catch (err) {
+                log(`Failed to eat: ${err.message}`, 'ERROR')
+            }
         }
     }
 })
