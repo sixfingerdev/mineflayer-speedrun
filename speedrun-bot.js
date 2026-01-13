@@ -491,13 +491,15 @@ function findVillageAutomatically() {
     state.villageSearchAttempts++
     
     // Look for village indicators: beds, hay, chests, bells
+    const villageIndicators = [
+        ...bedArray(),
+        mcData.blocksByName["hay_block"]?.id,
+        mcData.blocksByName["chest"]?.id,
+        mcData.blocksByName["bell"]?.id
+    ].filter(id => id !== undefined)
+    
     const villageBlocks = bot.findBlocks({
-        matching: [
-            ...bedArray(),
-            mcData.blocksByName["hay_block"].id,
-            mcData.blocksByName["chest"].id,
-            mcData.blocksByName["bell"]?.id
-        ].filter(id => id !== undefined),
+        matching: villageIndicators,
         maxDistance: 128,
         count: 10
     })
@@ -609,25 +611,25 @@ function raidVillage() {
         case woodDist:
             if (!state.wooden_pick) {
                 log('Priority: Mining wood')
-                setTimeout(() => { mineWood(wood, 3) }, 500)
+                setTimeout(() => { mineWood(wood) }, 500)
             }
             break
         case bedDist:
             if (state.beds < 4) {
                 log('Priority: Getting bed')
-                setTimeout(() => { mineBed(bed, 1) }, 500)
+                setTimeout(() => { mineBed(bed) }, 500)
             }
             break
         case chestDist:
             if (!state.chests) {
                 log('Priority: Getting chest')
-                setTimeout(() => { mineChest(chest, 1) }, 500)
+                setTimeout(() => { mineChest(chest) }, 500)
             }
             break
         case hayDist:
             if (state.hays < 8) {
                 log('Priority: Getting hay')
-                setTimeout(() => { mineHay(hay, 1) }, 500)
+                setTimeout(() => { mineHay(hay) }, 500)
             }
             break
         default:
@@ -671,17 +673,25 @@ function goToIronGolem(iron_golem) {
     state.goingToGolem = true
 }
 
+let attackAttempts = 0
+const MAX_ATTACK_ATTEMPTS = 50 // Safety limit to prevent infinite recursion
+
 function attackIronGolem() {
-    if (state.iron_golem_target != null) {
+    if (state.iron_golem_target != null && attackAttempts < MAX_ATTACK_ATTEMPTS) {
         if (distance(state.iron_golem_target.position, bot.entity.position) > 6.5) {
             goToIronGolem(state.iron_golem_target)
         } else {
             log('Attacking iron golem')
             bot.setControlState("jump", true)
             bot.attack(state.iron_golem_target)
+            attackAttempts++
             setTimeout(() => { attackIronGolem() }, 1250)
         }
     } else {
+        if (attackAttempts >= MAX_ATTACK_ATTEMPTS) {
+            log('Max attack attempts reached, stopping attack', 'WARN')
+        }
+        attackAttempts = 0
         log('Iron golem defeated')
         bot.setControlState("jump", false)
         
@@ -819,6 +829,14 @@ function findLava() {
 // INVENTORY MANAGEMENT
 // ============================================================================
 
+// Cache bed names for performance
+const bedNames = [
+    "white_bed", "orange_bed", "magenta_bed", "light_blue_bed",
+    "yellow_bed", "lime_bed", "pink_bed", "gray_bed",
+    "light_gray_bed", "cyan_bed", "purple_bed", "blue_bed",
+    "brown_bed", "green_bed", "red_bed", "black_bed"
+]
+
 function clearInventory() {
     log('Clearing non-essential items from inventory')
     
@@ -832,7 +850,7 @@ function clearInventory() {
         "oak_planks", "spruce_planks", "birch_planks",
         "jungle_planks", "acacia_planks", "dark_oak_planks",
         "flint_and_steel",
-        ...bedArray().map(id => Object.keys(mcData.blocksByName).find(key => mcData.blocksByName[key].id === id))
+        ...bedNames
     ]
     
     const inv = bot.inventory.items()
@@ -986,7 +1004,7 @@ bot.once("spawn", () => {
     bot.loadPlugin(require('mineflayer-collectblock').plugin)
     
     const movements = new Movements(bot, mcData)
-    movements.scafoldingBlocks.push(mcData.blocksByName.cobblestone.id)
+    movements.scaffoldingBlocks.push(mcData.blocksByName.cobblestone.id)
     bot.pathfinder.setMovements(movements)
     
     log('Bot initialized successfully')
@@ -1038,13 +1056,20 @@ bot.on("goal_reached", () => {
         case "ironPhase":
             if (state.goingToCraft) {
                 if (!state.bread || !state.bucket) {
+                    // Craft wheat first, then bread, then bucket
+                    // Timing constants for sequential crafting
+                    const WHEAT_CRAFT_DELAY = 9000  // 9 seconds for wheat crafting
+                    const BREAD_CRAFT_START = 9000  // Start bread after wheat
+                    const BUCKET_CRAFT_START = 34500 // Start bucket after bread (~25s for bread crafting)
+                    const ACTION_CONTINUE_DELAY = 35500 // Continue after all crafting
+                    
                     log('Crafting bread and bucket')
                     craftItem("wheat", state.hays)
-                    setTimeout(() => { craftItem("bread", state.hays * 3) }, 9000)
-                    setTimeout(() => { craftItem("bucket", 1) }, 34500)
+                    setTimeout(() => { craftItem("bread", state.hays * 3) }, BREAD_CRAFT_START)
+                    setTimeout(() => { craftItem("bucket", 1) }, BUCKET_CRAFT_START)
                     state.bread = true
                     state.bucket = true
-                    setTimeout(() => { chooseAction() }, 35500)
+                    setTimeout(() => { chooseAction() }, ACTION_CONTINUE_DELAY)
                 } else if (state.gravel && !state.flint) {
                     state.placeGravelHere = findPath()
                     putBlock("gravel", state.placeGravelHere)
