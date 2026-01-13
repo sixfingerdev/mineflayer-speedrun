@@ -861,50 +861,65 @@ async function buildNetherPortal() {
     
     if (lavaPositions.length === 0) {
         log('No lava found to build portal', 'ERROR')
+        setTimeout(() => findLava(), 5000)
         return
     }
     
-    // Build a simple 4x5 portal frame
-    // We'll convert lava to obsidian using water bucket
+    // Build portal using the water bucket on lava method
     const lavaPos = lavaPositions[0]
     log(`Building portal near lava at ${lavaPos}`)
     
     try {
-        // Build portal frame - simplified obsidian placement
-        // In reality, we'd need to carefully place water on lava to create obsidian
-        // For speedrun, we look for a natural lava pool configuration
+        // Strategy: Place water source blocks to flow onto lava and create obsidian
+        // Then build up the portal frame
         
-        // First, place water near lava to create obsidian
         equipItem("water_bucket", "hand")
         await bot.waitForTicks(20)
         
         log('Creating obsidian blocks by placing water on lava')
-        // The water will flow and convert lava to obsidian
         
-        // After obsidian is created, light the portal
-        setTimeout(() => {
+        // Try to create obsidian by water-lava interaction
+        // In a real speedrun, this would be more sophisticated
+        // For now, we'll wait and check for obsidian
+        
+        await bot.waitForTicks(100) // Wait 5 seconds for obsidian formation
+        
+        // Check if we have obsidian blocks nearby
+        const obsidianBlocks = bot.findBlocks({
+            matching: mcData.blocksByName["obsidian"].id,
+            maxDistance: 16,
+            count: 10
+        })
+        
+        if (obsidianBlocks.length >= 10) {
+            log(`Found ${obsidianBlocks.length} obsidian blocks - attempting to light portal`)
+            
+            // Light the portal
             equipItem("flint_and_steel", "hand")
-            log('Lighting the Nether portal')
+            await bot.waitForTicks(20)
             
-            // Find the portal frame and light it
-            const portalFrameBlock = bot.findBlock({
-                matching: mcData.blocksByName["obsidian"].id,
-                maxDistance: 16
-            })
-            
-            if (portalFrameBlock) {
-                bot.lookAt(portalFrameBlock.position)
-                bot.activateItem()
+            // Find a suitable obsidian block to light from
+            const centerObsidian = bot.blockAt(obsidianBlocks[0])
+            if (centerObsidian) {
+                log('Lighting the Nether portal')
+                await bot.lookAt(centerObsidian.position)
+                await bot.activateBlock(centerObsidian)
+                
                 log('Portal lit! Waiting for portal to activate...')
                 state.portalBuilt = true
                 
                 // Enter the portal
                 setTimeout(() => enterNetherPortal(), 3000)
             }
-        }, 5000)
+        } else {
+            log('Not enough obsidian created, retrying...', 'WARN')
+            setTimeout(() => buildNetherPortal(), 5000)
+        }
         
     } catch (err) {
         log(`Portal building error: ${err.message}`, 'ERROR')
+        // Retry after error
+        setTimeout(() => buildNetherPortal(), 5000)
     }
 }
 
@@ -1054,8 +1069,26 @@ function attackBlaze() {
     } else {
         // Attack the blaze
         equipItem("stone_axe", "hand")
+        bot.lookAt(blazeTarget.position.offset(0, 1, 0))
+        
+        // Jump attack for critical hits
+        bot.setControlState("jump", true)
+        setTimeout(() => bot.setControlState("jump", false), 100)
+        
         bot.attack(blazeTarget)
         blazeAttackAttempts++
+        
+        // Eat if health is low
+        if (bot.health < 12 && hasItem("bread")) {
+            try {
+                bot.equip(hasItem("bread"), "hand")
+                bot.activateItem()
+                equipItem("stone_axe", "hand")
+            } catch (err) {
+                log(`Failed to eat: ${err.message}`, 'ERROR')
+            }
+        }
+        
         setTimeout(() => attackBlaze(), 500)
     }
 }
@@ -1172,10 +1205,27 @@ function attackEnderman() {
         setTimeout(() => attackEnderman(), 500)
     } else {
         // Look at and attack the enderman to provoke it
-        bot.lookAt(endermanTarget.position.offset(0, 1, 0))
+        bot.lookAt(endermanTarget.position.offset(0, 1.5, 0))
         equipItem("stone_axe", "hand")
+        
+        // Jump attack for critical hits
+        bot.setControlState("jump", true)
+        setTimeout(() => bot.setControlState("jump", false), 100)
+        
         bot.attack(endermanTarget)
         endermanAttackAttempts++
+        
+        // Eat if health is low
+        if (bot.health < 12 && hasItem("bread")) {
+            try {
+                bot.equip(hasItem("bread"), "hand")
+                bot.activateItem()
+                equipItem("stone_axe", "hand")
+            } catch (err) {
+                log(`Failed to eat: ${err.message}`, 'ERROR')
+            }
+        }
+        
         setTimeout(() => attackEnderman(), 500)
     }
 }
@@ -1508,11 +1558,33 @@ function continueAttackingDragon() {
     if (dist < 20) {
         log('Dragon in range - attacking!')
         equipItem("stone_axe", "hand")
-        bot.lookAt(dragonTarget.position)
+        bot.lookAt(dragonTarget.position.offset(0, 1, 0))
+        
+        // Jump and attack for critical hits
+        bot.setControlState("jump", true)
+        setTimeout(() => bot.setControlState("jump", false), 100)
+        
         bot.attack(dragonTarget)
         dragonAttackAttempts++
     } else {
         log(`Dragon far away (${dist.toFixed(1)} blocks), waiting for perch...`)
+        
+        // Move towards dragon's general area
+        if (dist > 50) {
+            const goal = new GoalNear(dragonTarget.position.x, dragonTarget.position.y, dragonTarget.position.z, 20)
+            bot.pathfinder.setGoal(goal)
+        }
+    }
+    
+    // Eat if health is low
+    if (bot.health < 15 && hasItem("bread")) {
+        log('Combat healing - eating bread')
+        try {
+            bot.equip(hasItem("bread"), "hand")
+            bot.activateItem()
+        } catch (err) {
+            log(`Failed to eat: ${err.message}`, 'ERROR')
+        }
     }
     
     // Continue attacking
@@ -2042,8 +2114,25 @@ bot.on("health", () => {
         // Try to eat bread if available
         if (hasItem("bread")) {
             log('Eating bread to restore health')
-            bot.equip(hasItem("bread"), "hand")
-            bot.activateItem()
+            try {
+                bot.equip(hasItem("bread"), "hand")
+                bot.activateItem()
+            } catch (err) {
+                log(`Failed to eat: ${err.message}`, 'ERROR')
+            }
+        }
+    }
+    
+    // Eat when food is low (during combat especially)
+    if (bot.food < 10 && (state.current === "fightingDragon" || state.current === "netherPhase" || state.current === "huntingEndermen")) {
+        if (hasItem("bread")) {
+            log('Food low - eating bread')
+            try {
+                bot.equip(hasItem("bread"), "hand")
+                bot.activateItem()
+            } catch (err) {
+                log(`Failed to eat: ${err.message}`, 'ERROR')
+            }
         }
     }
 })
